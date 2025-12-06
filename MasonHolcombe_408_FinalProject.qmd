@@ -1,0 +1,243 @@
+---
+title: "MasonHolcombe_408_FinalProject"
+format: html
+editor: visual
+---
+
+Mason Holcombe
+
+Stat 408 Final Project R code for data processing, model building, and visualizations
+
+## Dependencies
+
+```{r echo=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(glmnet)
+library(knitr)
+```
+
+```{r}
+set.seed(123)
+```
+
+## Data Ingestion
+
+```{r}
+lol25 = read.csv("Data/2025_LoL_esports_match_data_from_OraclesElixir.csv") %>%
+  filter(!is.na(result))
+colnames(lol25)
+```
+
+## Data Processing 
+
+```{r}
+cols_to_remove = c("gameid", "datacompleteness", "url", "league", "year",
+                   "split", "date", "game", "participantid",
+                   "playername", "playerid", "teamname", "teamid",
+                   "ban1", "ban2", "ban3", "ban4", "ban5",
+                   "pick1", "pick2", "pick3", "pick4", "pick5",
+                   "result")
+X = lol25 %>% 
+  select(-all_of(cols_to_remove)) %>%
+  mutate(across(everything(), ~ replace_na(., 0)))
+X = model.matrix(~ . - 1, data = X)
+X_df = as.data.frame(X)
+
+y = as.numeric(lol25$result)
+```
+
+## LASSO CV
+
+```{r}
+lasso_cv = cv.glmnet(
+  X, y,
+  alpha = 1,
+  family = "binomial",
+  nlambda = 30,
+  nfolds = 5,
+)
+plot(lasso_cv)
+```
+
+#### Optimal Lambda
+
+```{r}
+best_lambda = lasso_cv$lambda.min
+model_best = glmnet(X, y, alpha = 1, lambda = best_lambda, family = "binomial")
+```
+
+#### All Coefficients
+
+```{r}
+coef_df = as.data.frame(as.matrix(coef(model_best)))
+coef_df$feature = rownames(coef_df)
+colnames(coef_df)[1] = "coefficient"
+
+coef_df = coef_df[coef_df$feature != "(Intercept)", ]
+
+ggplot(coef_df, aes(x = reorder(feature, coefficient), y = coefficient)) +
+  geom_bar(stat = "identity", fill="steelblue") +
+  coord_flip() +
+  labs(title = "Coefficients of Lasso Model",
+       x = "Features",
+       y = "Coefficient Value") +
+  theme_minimal()
+
+```
+
+#### Top/Bot 10 Coefficients
+
+```{r}
+# Select top 10 positive and top 10 negative
+top_coefs = coef_df %>%
+  arrange(desc(coefficient)) %>%
+  slice(1:20) %>%
+  bind_rows(
+    coef_df %>%
+      arrange(coefficient) %>%
+      slice(1:20)
+  )
+
+ggplot(top_coefs, aes(x = reorder(feature, coefficient), y = coefficient)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top 10 Positive and Negative Coefficients",
+       x = "Features",
+       y = "Coefficient Value") +
+  theme_minimal()
+
+```
+
+```{r}
+top_important_lasso_features = top_coefs$feature
+top_important_lasso_features
+```
+
+## Selected Features Logistic Regression
+
+Model 1: Hand chosen features based empirically\
+Model 2: Features determined by LASSO regression
+
+#### Model 1
+
+```{r}
+model1_cols = c(
+  "playoffs","side","position",
+  "kills", "deaths", "assists",
+  "teamkills", "teamdeaths",
+  "doublekills", "triplekills", "quadrakills", "pentakills",
+  "firstblood", "firstbloodkill", "firstbloodassist",
+  "team.kpm",
+  "damagetochampions", "dpm", "damageshare",
+  "damagetakenperminute", "damagemitigatedperminute", "damagetotowers",
+  "wardsplaced", "wpm", "wardskilled", "wcpm", "controlwardsbought",
+  "visionscore", "vspm",
+  "totalgold", "earnedgold", "earned.gpm", "earnedgoldshare", "goldspent",
+  "minionkills", "monsterkills",
+  "result"
+)
+
+model1_data = lol25 %>%
+  select(all_of(model1_cols)) %>%
+  mutate(across(everything(), ~ replace_na(., 0)))
+
+model1_matrix = model.matrix(~ . - 1, data = model1_data)  # remove intercept
+model1_df = as.data.frame(model1_matrix)
+
+model1 = glm(result ~ ., data = model1_df, family = binomial())
+```
+
+Print confusion matrix of the binary regression
+
+```{r}
+pred_prob1 = predict(model1, type = "response")
+pred_class1 = ifelse(pred_prob1 > 0.5, 1, 0)
+
+confusion_matrix1 = as.data.frame.matrix(
+  table(pred = pred_class1, actual = model1_df$result)
+)
+
+confusion_matrix1
+```
+
+#### Model 2
+
+```{r}
+model2_cols = c(top_coefs$feature, "result")
+
+model2_data = lol25 %>%
+  mutate(across(everything(), ~ replace_na(., 0)))
+
+model2_matrix = model.matrix(~ . - 1, data = model2_data)
+model2_matrix = model2_matrix[, model2_cols, drop = FALSE]
+model2_df = as.data.frame(model2_matrix)
+
+model2 = glm(result ~ ., data = model2_df, family = binomial())
+```
+
+Print confusion matrix of the binary regression
+
+```{r}
+pred_prob2 = predict(model2, type = "response")
+pred_class2 = ifelse(pred_prob2 > 0.5, 1, 0)
+
+confusion_matrix2 = as.data.frame.matrix(
+  table(pred = pred_class2, actual = model2_df$result)
+)
+
+confusion_matrix2
+```
+
+## Best Model Summary
+
+```{r}
+summary(model1)
+```
+
+## Visualizations
+
+Win/Loss count in dataset
+
+```{r}
+ggplot(lol25, aes(x = factor(result))) +
+  geom_bar() +
+  labs(title = "Wins vs Losses",
+       x = "Result (0 = Loss, 1 = Win)",
+       y = "Count")
+
+```
+
+Kills, Deaths, Assists by Result & Position
+
+```{r}
+df_long = lol25 %>%
+  filter(position != "team") %>%
+  select(result, position, kills, deaths, assists) %>%
+  pivot_longer(
+    cols = c(kills, deaths, assists),
+    names_to = "stat",
+    values_to = "value"
+  ) %>% 
+  mutate(
+    stat = factor(stat,
+                  levels = c("kills", "deaths", "assists"))
+  )
+
+ggplot(df_long, aes(x = position, y = value, fill = stat)) +
+  geom_boxplot() +
+  facet_wrap(~ result,
+             labeller = as_labeller(c(`0` = "Loss",
+                                      `1` = "Win"))) +
+  labs(
+    title = "Kills, Deaths, and Assists by Result & Position",
+    x = "Position",
+    y = "Value"
+  ) +
+  scale_fill_manual(values = c(
+    "kills" = "skyblue",
+    "deaths" = "salmon",
+    "assists" = "lightgreen"
+  ))
+```
